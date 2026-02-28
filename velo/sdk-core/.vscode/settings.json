@@ -1,0 +1,19 @@
+{
+    "cmake.configureOnOpen": true,
+    "cmake.exportCompileCommands": true,
+    "cmake.buildDirectory": "${workspaceFolder}/build",
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/build",
+        "--all-scopes-completion",
+        "--completion-style=detailed",
+        "--header-insertion=never",
+        "-j=4",
+        "--background-index",
+        "--clang-tidy",
+        "--fallback-style=Google"
+    ],
+    "clangd.fallbackFlags": [
+        "-I${workspaceFolder}/include",
+        "-I${workspaceFolder}/src"
+    ]
+}
