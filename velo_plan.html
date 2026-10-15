@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Velo：以 Chromium 学习为主线的可执行开发方案 v3.0</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; max-width: 960px; margin: 2rem auto; padding: 0 1.5rem; color: #222; }
+  h1 { border-bottom: 2px solid #333; padding-bottom: .5rem; }
+  h2 { border-bottom: 1px solid #ddd; padding-bottom: .3rem; margin-top: 2.5rem; }
+  h3 { margin-top: 1.8rem; color: #333; }
+  h4 { margin-top: 1.2rem; color: #555; }
+  code { background: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-family: "SF Mono", Consolas, monospace; font-size: .9em; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; border: 1px solid #e1e4e8; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: .6rem .8rem; text-align: left; vertical-align: top; }
+  th { background: #f6f8fa; }
+  blockquote { border-left: 4px solid #ccc; padding-left: 1rem; color: #555; margin-left: 0; }
+  .meta { background: #f6f8fa; padding: 1rem 1.5rem; border-radius: 6px; border: 1px solid #e1e4e8; }
+  .meta p { margin: .3rem 0; }
+  hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
+  ul, ol { padding-left: 1.6rem; }
+</style>
+</head>
+<body>
+
+<h1>Velo：以 Chromium 学习为主线的可执行开发方案 v3.0</h1>
+
+<div class="meta">
+<p><strong>版本：</strong>3.0</p>
+<p><strong>项目形态：</strong>基于 Chromium 的 Android 原生通讯应用（作为学习夹具）</p>
+<p><strong>项目真正目标：</strong>通过一个真实可用的私有通讯应用，系统学习 Chromium 的 Android 嵌入、网络栈、Mojo/IPC、WebRTC native、Tracing 与构建系统</p>
+<p><strong>产品目标（次要）：</strong>小规模私有使用，支持文字聊天室、多人语音房和屏幕共享</p>
+<p><strong>规模目标：</strong>约 30 名用户；语音房按 2、5、10、30 逐级验证；产品指标以“能跑通”为准，不以商业 SLA 为准</p>
+<p><strong>部署前提：</strong>服务端运行在一台可被成员通过 Tailscale 或同类覆盖网络访问的 Linux 主机上</p>
+<p><strong>当前基线：</strong>Chromium <code>145.0.7632.218</code>，commit <code>d864cf709544129e9a4f101247d08628a864dcc5</code>；Linux x64 编译环境已建立</p>
+</div>
+
+<hr>
+
+<h2>0. 项目定位与优先级</h2>
+
+<p>这是一份<strong>学习型项目</strong>方案，不是商业 MVP 方案。所有决策以“最大化 Chromium 学习密度”为第一优先级，以“产出可用的私有通讯工具”为第二优先级。</p>
+
+<h3>优先级顺序</h3>
+<ol>
+<li><strong>真实进入 Chromium 子系统</strong>：Android Content embedder、JNI、Browser Process、Network Service、Mojo、WebRTC native、Tracing。</li>
+<li><strong>每个阶段都有可观察、可解释、可复现的最小闭环</strong>：能画调用图、线程图、Trace。</li>
+<li><strong>产品功能只作为夹具</strong>：聊天、语音、屏幕共享是把 Chromium 能力串起来的线，不是终点。</li>
+<li><strong>服务端和运维最小化</strong>：Go + SQLite + Janus 保持够用即可，不追求高可用、多端策略、复杂权限。</li>
+</ol>
+
+<h3>明确不作为主线的内容</h3>
+<ul>
+<li>不追求 30 人高并发稳定性，只做逐级验证。</li>
+<li>不做公开注册、找回密码、复杂权限后台。</li>
+<li>不做消息搜索、消息撤回、文件传输、录制、推送。</li>
+<li>不做 E2EE。</li>
+<li>不做产品级 UI 打磨，UI 只保证能操作、能显示状态。</li>
+<li>不先做大规模性能优化，但要做性能基线记录。</li>
+</ul>
+
+<h3>学习产出要求（贯穿全项目）</h3>
+<p>每个阶段产出以下内容，放在 <code>src/velo/docs/learning/</code>：</p>
+<ul>
+<li><strong>调用图</strong>：本阶段涉及的类、函数、时序。</li>
+<li><strong>线程/进程图</strong>：代码跑在哪个进程、哪个 TaskRunner。</li>
+<li><strong>Trace/日志证据</strong>：<code>TRACE_EVENT</code> 截图或 logcat 关键片段。</li>
+<li><strong>源码阅读清单</strong>：本阶段涉及的 Chromium 源码路径与关键类。</li>
+<li><strong>失败记录</strong>：卡点、复现命令、试过的方案、最终结论。</li>
+<li><strong>最小 patch 集</strong>：本阶段对 Chromium 的改动，尽量小、尽量不动上游。</li>
+</ul>
+
+<p><strong>验收问题：</strong></p>
+<ol>
+<li>这条链路经过哪些进程和线程？</li>
+<li>关键类、关键函数分别在哪？</li>
+<li>如果我想改一个行为，最小改动点在哪？</li>
+<li>这个子系统在真实 Chrome 里是怎么用的？我们的 embedder 缺了什么？</li>
+</ol>
+
+<hr>
+
+<h2>1. 学习主线与主攻方向</h2>
+
+<p>Chromium 太大，必须在项目开始就选 2–3 个主攻方向，其他作为支撑。</p>
+
+<h3>主攻方向</h3>
+<ul>
+<li><strong>A. Android Content Embedder + JNI + Browser Process 生命周期</strong><br>
+<code>ContentMain</code>、<code>BrowserMainParts</code>、<code>ContentBrowserClient</code>、JNI Zero、进程模型、TaskRunner。</li>
+<li><strong>B. Chromium 网络栈</strong><br>
+<code>URLLoaderFactory</code>、<code>NetworkContext</code>、<code>NetworkService</code>、WebSocket、Cookie、代理、断网重连。</li>
+<li><strong>C. WebRTC Native 集成</strong><br>
+<code>AudioDeviceModule</code>、<code>PeerConnection</code>、ICE、RTP、自定义 <code>VideoCapturer</code>、<code>MediaProjection</code>。</li>
+</ul>
+
+<h3>支撑方向</h3>
+<ul>
+<li><strong>D. Mojo/IPC 与 WebContents/Renderer</strong>：通过一个诊断 WebUI 页面接入。</li>
+<li><strong>E. Tracing / Perfetto / 日志 / 崩溃符号</strong>：贯穿全项目。</li>
+<li><strong>F. GN/Ninja/gclient/DEPS</strong>：构建系统与上游对齐。</li>
+</ul>
+
+<h3>学习产物形态</h3>
+<p>每个主攻方向结束时，应该能写出一份“如果我要在 Chromium 里改这个子系统，从哪里下手”的笔记，并附一个最小 patch。</p>
+
+<hr>
+
+<h2>2. 技术方案（保留 v2 骨架，微调）</h2>
+
+<h3>2.1 客户端</h3>
+<ul>
+<li><strong>UI：</strong>Android 原生，Kotlin + ViewModel/StateFlow。UI 是学习夹具的外壳。</li>
+<li><strong>Native 入口：</strong>通过 Chromium JNI Zero 调用 C++ <code>VeloRuntime</code>。</li>
+<li><strong>运行位置：</strong>Velo C++ Core 跑在 Android 宿主进程，与 Chromium Browser Process 生命周期协同。</li>
+<li><strong>Chromium 职责：</strong>
+<ul>
+<li>优先使用 <code>base</code>、任务调度、日志/Tracing、<code>NetworkService</code>、<code>third_party/webrtc</code>；</li>
+<li><strong>新增：</strong>提供一个 WebContents 承载的内部诊断页（本地 WebUI），用于学习 Blink、Renderer、Mojo、导航。</li>
+</ul>
+</li>
+<li><strong>WebRTC：</strong>使用 Chromium checkout 对应版本的 WebRTC native 接口，通过标准 <code>PeerConnection</code> 连 SFU。</li>
+</ul>
+
+<h3>2.2 服务端（降级为夹具）</h3>
+<ul>
+<li><strong>Velo API：</strong>Go + WebSocket + SQLite。只保留最小接口：<code>/healthz</code>、登录、房间、消息、<code>rtc-ticket</code>。</li>
+<li><strong>媒体 SFU：</strong>Janus VideoRoom 插件。只做链路验证，不做高可用。</li>
+<li><strong>部署：</strong>Docker Compose，Tailscale 提供覆盖网络。</li>
+<li><strong>原则：</strong>服务端任何超过 200 行的模块都要重新评估是否必要。</li>
+</ul>
+
+<h3>2.3 总体结构</h3>
+<pre><code>Android Native UI (Kotlin)
+  ├── Login / Room / Chat / Voice / Share screens
+  ├── ViewModel + StateFlow
+  ├── Diagnostic WebView 入口（可选）
+  └── JNI Facade (JNI Zero)
+          │
+          ▼
+VeloRuntime (C++，宿主进程 / Chromium Browser Process)
+  ├── SessionService
+  ├── ChatService
+  ├── RoomService
+  ├── RtcService
+  ├── ScreenShare coordination
+  ├── EventDispatcher
+  └── DiagnosticsBridge (Mojo/WebUI 对接)
+          │
+          ├── Chromium base / task scheduling / logs / trace
+          ├── Chromium NetworkService (URLLoader / WebSocket)
+          ├── Chromium Mojo/IPC + WebContents (诊断页)
+          └── Chromium WebRTC native API
+                    │
+          ┌─────────┴─────────┐
+          ▼                   ▼
+   Velo API (Go)        Janus VideoRoom SFU
+   REST + WebSocket     WebSocket signaling + WebRTC media
+          │                   │
+          └──── SQLite        └──── Media streams</code></pre>
+
+<p><strong>关键实施原则：</strong></p>
+<ul>
+<li>业务状态归 Velo Core 所有；Android 只负责界面和系统权限；Chromium 提供基础能力。</li>
+<li>UI 不直接操作 WebRTC 对象；ChatService 不直接访问 Android Activity。</li>
+<li><strong>学习产物与代码同等重要</strong>：没有笔记和 Trace 的阶段不算完成。</li>
+</ul>
+
+<hr>
+
+<h2>3. 仓库与工作区</h2>
+
+<pre><code>~/chromium-dev/
+├── depot_tools/
+├── chromium/
+│   └── src/
+│       └── velo/
+└── env-lock/
+
+src/velo/
+├── BUILD.gn
+├── core/
+│   ├── velo_runtime.{h,cc}
+│   ├── event_dispatcher.{h,cc}
+│   ├── session/
+│   ├── chat/
+│   ├── room/
+│   ├── rtc/
+│   └── diagnostics/            # 与 WebUI/Mojo 对接
+├── android/
+│   ├── java/
+│   └── BUILD.gn
+├── webui/                      # 本地诊断页（HTML/JS）
+├── protocol/
+│   └── message_schema.md
+├── server/                     # 最小化
+│   ├── cmd/velo-api/
+│   ├── internal/
+│   ├── migrations/
+│   └── Dockerfile
+├── deploy/
+│   ├── compose.yaml
+│   └── janus/
+├── docs/
+│   ├── decisions.md
+│   ├── api.md
+│   ├── operations.md
+│   └── learning/               # 每阶段学习产物
+│       ├── 00_baseline.md
+│       ├── 01_android_embedder.md
+│       ├── 02_jni.md
+│       ├── 03_network.md
+│       ├── 04_mojo_webui.md
+│       ├── 05_webrtc_audio.md
+│       ├── 06_screen_share.md
+│       ├── 07_tracing.md
+│       └── 08_integration.md
+└── config/
+    └── m145_devrelease.args.gn</code></pre>
+
+<h3>初始化</h3>
+<pre><code>cd ~/chromium-dev/chromium/src
+git status --short
+git tag --list 'baseline/m145.0.7632.218'
+
+git tag baseline/m145.0.7632.218 d864cf709544129e9a4f101247d08628a864dcc5
+git switch -c velo/mvp</code></pre>
+
+<p><code>git status --short</code> 有未提交修改时先保存，不要直接丢弃。</p>
+
+<hr>
+
+<h2>4. 阶段 0：基线与构建系统（学习目标：GN/Ninja/gclient/DEPS）</h2>
+
+<h3>学习目标</h3>
+<ul>
+<li>理解 <code>gclient sync</code>、<code>gclient runhooks</code>、DEPS 的作用。</li>
+<li>理解 <code>args.gn</code>、<code>gn gen</code>、<code>autoninja</code> 的关系。</li>
+<li>理解 <code>is_component_build</code>、<code>is_debug</code>、<code>symbol_level</code>、<code>target_cpu</code> 对产物和调试的影响。</li>
+<li>理解 baseline commit 和分支策略。</li>
+</ul>
+
+<h3>任务</h3>
+<ol>
+<li>保留 <code>baseline/m145.0.7632.218</code> tag，建 <code>velo/mvp</code> 分支。</li>
+<li>验证 Linux <code>out/m145_release</code> 可启动：
+<pre><code>out/m145_release/chrome \
+  --user-data-dir=/tmp/chromium-m145-velo-test \
+  --enable-logging=stderr --log-level=0</code></pre>
+</li>
+<li>保存 <code>out/m145_release/args.gn</code> 到 <code>src/velo/config/m145_devrelease.args.gn</code>。</li>
+<li>记录 <code>src/third_party/depot_tools</code> 的 revision。</li>
+<li>用 <code>gn args --list out/m145_release</code> 或 <code>gn desc</code> 观察关键 target 依赖。</li>
+<li>写 <code>docs/learning/00_baseline.md</code>：构建命令、args 含义、验证结果、踩坑。</li>
+</ol>
+
+<h3>验收</h3>
+<ul>
+<li>baseline tag、分支、构建配置可查。</li>
+<li><code>gn gen</code> 和 <code>autoninja -C out/m145_release chrome</code> 可完成。</li>
+<li>能解释 <code>args.gn</code> 中每个参数的作用。</li>
+<li>能指出 Chromium 顶层 target 中 <code>chrome</code>、<code>content_shell</code>、<code>content</code> 的关系。</li>
+</ul>
+
+<p><strong>退出条件：</strong>不再投入环境冻结，进入 Android 宿主验证。</p>
+
+<hr>
+
+<h2>5. 阶段 1：Android Content Embedder（学习目标：ContentMain / BrowserMainParts / 进程模型）</h2>
+
+<p>这是整个学习项目最关键的阶段。Linux <code>chrome</code> 能跑不等于 Android 嵌入链路打通。</p>
+
+<h3>学习目标</h3>
+<ul>
+<li>理解 Android 上 Chromium 的进程模型：Browser Process、Renderer、GPU、Network Service、Utility。</li>
+<li>理解 <code>ContentMain</code>、<code>ContentMainRunner</code>、<code>BrowserMainParts</code>、<code>ContentBrowserClient</code> 的职责。</li>
+<li>理解 <code>ContentShellActivity</code> 到 native 初始化的完整路径。</li>
+<li>理解 Android <code>Application</code>、<code>Activity</code>、<code>Service</code> 与 Browser Process 生命周期的关系。</li>
+<li>理解 native library 加载、<code>System.loadLibrary</code>、<code>libcontent_shell_content_view.so</code> 等。</li>
+</ul>
+
+<h3>任务顺序</h3>
+<ol>
+<li>按 M145 Android 构建要求准备 SDK/NDK/JDK/host tools。</li>
+<li>构建并安装 <code>content_shell_apk</code>，作为 Android build smoke test。</li>
+<li>用 <code>adb logcat</code> 抓 <code>content_shell</code> 启动日志，标出 Browser Process 初始化关键点。</li>
+<li>阅读 <code>content/shell/android/</code>、<code>content/public/android/</code>、<code>content/app/android/</code> 相关源码。</li>
+<li>创建最小 <code>//velo/android</code> APK target，UI 只保留一个启动页和一个按钮。</li>
+<li>参考 <code>ContentShellActivity</code> 的最小接线，不复制整个 Shell UI。</li>
+<li>由 Kotlin 调用 JNI 进入 <code>VeloRuntime::Start()</code>；返回结果和事件通过统一接口送回 UI。</li>
+<li>用 <code>LOG(INFO)</code> 和 <code>TRACE_EVENT</code> 记录启动、关闭、JNI 调用及线程信息。</li>
+<li>在 <code>docs/learning/01_android_embedder.md</code> 画启动时序图。</li>
+</ol>
+
+<h3>验收</h3>
+<ul>
+<li>真机安装并启动 Velo APK。</li>
+<li>点击按钮后 Java → JNI → C++ → callback 完整。</li>
+<li>C++ 启动/关闭可重复执行，无重复初始化、悬空回调或崩溃。</li>
+<li><code>logcat</code> 能看到 Browser Process 初始化路径和 VeloRuntime 日志。</li>
+<li>能回答：Browser Process 在哪个线程初始化？<code>ContentMainRunner</code> 做了什么？VeloRuntime 跑在哪个 TaskRunner？</li>
+</ul>
+
+<h3>风险处理</h3>
+<p>若 2 个短迭代内无法打通 Content 宿主，先做最小复现，确认卡点是 APK 接入、Browser Process 初始化还是 JNI 注册，再继续。</p>
+
+<hr>
+
+<h2>6. 阶段 2：JNI 与线程模型（学习目标：JNI Zero / TaskRunner / 生命周期）</h2>
+
+<h3>学习目标</h3>
+<ul>
+<li>理解 JNI Zero 的代码生成机制。</li>
+<li>理解 Java 线程与 native TaskRunner 的映射。</li>
+<li>理解 <code>base::SequencedTaskRunner</code>、<code>ThreadPool</code>、<code>PostTask</code> 的使用。</li>
+<li>理解 Java 对象在 native 侧的生命周期管理。</li>
+</ul>
+
+<h3>任务</h3>
+<ol>
+<li>用 JNI Zero 定义 <code>VeloRuntime</code> 的 Java/C++ 边界。</li>
+<li>实现 <code>Start</code>、<code>Stop</code>、<code>Ping</code>、<code>SetEventCallback</code>。</li>
+<li>所有 native 回调通过统一 <code>EventDispatcher</code> 送回 Java。</li>
+<li>在 <code>docs/learning/02_jni.md</code> 画出 Java → JNI → C++ → callback 的线程流。</li>
+<li>用 <code>TRACE_EVENT</code> 标记 JNI 边界，抓一次 trace。</li>
+</ol>
+
+<h3>验收</h3>
+<ul>
+<li>能解释 JNI Zero 生成的代码在哪、如何注册。</li>
+<li>能指出每个方法运行在哪个 TaskRunner。</li>
+<li>能证明没有从错误线程调用 Java 回调。</li>
+<li>停止后无悬空回调、无内存泄漏（用 ASan 或 heapprofiler 至少观察一次）。</li>
+</ul>
+
+<hr>
+
+<h2>7. 阶段 3：Chromium 网络栈（学习目标：NetworkService / URLLoader / WebSocket）</h2>
+
+<h3>学习目标</h3>
+<ul>
+<li>理解 Chromium 网络栈的进程模型（Network Service）。</li>
+<li>理解 <code>NetworkContext</code>、<code>URLLoaderFactory</code>、<code>URLLoader</code>、<code>ResourceRequest</code>。</li>
+<li>理解 WebSocket 在 Chromium 中的实现路径。</li>
+<li>理解 Cookie、代理、DNS、断网重连。</li>
+</ul>
+
+<h3>任务</h3>
+<ol>
+<li>从 Velo Core 发起一次 HTTP 请求并收到 <code>/healthz</code> 响应。</li>
+<li>建立 WebSocket 长连接，收发一条消息。</li>
+<li>记录 Network Service 进程出现与生命周期。</li>
+<li>在 <code>docs/learning/03_network.md</code> 画出请求经过的进程/线程/类。</li>
+<li>对比“如果我用 OkHttp 会怎样”，指出 Chromium 网络栈的额外复杂度与收益。</li>
+</ol>
+
+<h3>验收</h3>
+<ul>
+<li>Android 真机上能完成 HTTP 和 WebSocket。</li>
+<li><code>logcat</code> / <code>chrome://net-export</code> 或等价手段能看到请求路径。</li>
+<li>能解释 <code>NetworkContext</code> 从哪来，<code>URLLoaderFactory</code> 如何创建。</li>
+<li>能说明断网时哪个层报错，如何做重连。</li>
+</ul>
+
+<h3>若卡住</h3>
+<p>如果 Network Service 在自定义 embedder 中初始化困难，记录下来作为学习产物，并评估是否临时用 <code>content_shell</code> 的默认路径。</p>
+
+<hr>
+
+<h2>8. 阶段 4：Mojo/IPC 与 WebContents 诊断页（学习目标：Mojo / Renderer / Blink）</h2>
+
+<p>这是 v3 相对 v2 新增的阶段。目的是补上 Blink、Renderer、Mojo、导航、WebUI 这条线。</p>
+
+<h3>学习目标</h3>
+<ul>
+<li>理解 Mojo 接口定义、绑定、消息路由。</li>
+<li>理解 Browser Process 与 Renderer 的 IPC。</li>
+<li>理解 WebContents、NavigationController、RenderFrameHost。</li>
+<li>理解 WebUI 与普通页面的差异。</li>
+</ul>
+
+<h3>任务</h3>
+<ol>
+<li>创建一个内部诊断 WebContents，加载本地 WebUI（<code>velo://diagnostics</code> 或 <code>chrome://velo</code>）。</li>
+<li>诊断页展示：Chromium 版本、GN args、网络状态、WebSocket 状态、WebRTC stats、VeloRuntime 事件流。</li>
+<li>通过 Mojo 在 WebUI 和 <code>VeloRuntime</code> 之间建立一条最小消息通道。</li>
+<li>可选：接入 DevTools（远程调试）。</li>
+<li>在 <code>docs/learning/04_mojo_webui.md</code> 画出 Browser/Renderer/Mojo 消息流。</li>
+</ol>
+
+<h3>验收</h3>
+<ul>
+<li>诊断页能在 Android 真机上打开并显示实时数据。</li>
+<li>能从 WebUI 触发一次 <code>VeloRuntime</code> 的 Ping 并收到响应。</li>
+<li>能解释这条消息经过哪些进程、哪些 Mojo 接口。</li>
+<li>能指出 WebUI 与普通网页在权限、绑定、加载路径上的差异。</li>
+</ul>
+
+<hr>
+
+<h2>9. 阶段 5：WebRTC Native 音频链路（学习目标：AudioDeviceModule / PeerConnection / ICE）</h2>
+
+<h3>学习目标</h3>
+<ul>
+<li>理解 Chromium WebRTC native 的模块结构。</li>
+<li>理解 <code>AudioDeviceModule</code>、<code>AudioSource</code>、<code>AudioTrack</code>。</li>
+<li>理解 <code>PeerConnection</code>、SDP、ICE、DTLS、SRTP。</li>
+<li>理解 Android 音频采集与播放路径。</li>
+</ul>
+
+<h3>任务</h3>
+<ol>
+<li>服务端提供最小 <code>/rtc-ticket</code>。</li>
+<li>客户端通过 WebSocket 连 Janus，创建 session/handle，加入 VideoRoom。</li>
+<li>在 <code>RtcService</code> 中创建 <code>PeerConnection</code>，打通 offer/answer、ICE candidate。</li>
+<li>先用 Janus <code>echotest</code> 做单链路验证。</li>
+<li>请求 Android 麦克风权限，完成采集、发送、接收、播放。</li>
+<li>将 RTC 状态转成 Velo 事件：<code>Connecting</code>、<code>Connected</code>、<code>Reconnecting</code>、<code>Disconnected</code>、<code>Failed</code>。</li>
+<li>验证后台、锁屏、耳机、Wi-Fi/移动切换。</li>
+<li>在 <code>docs/learning/05_webrtc_audio.md</code> 画出音频链路：麦克风 → ADM → Track → PeerConnection → ICE → Janus → 对端。</li>
+</ol>
+
+<h3>验收</h3>
+<ul>
+<li>两台真机可互相听到声音，连续 15 分钟。</li>
+<li>静音/取消静音有效。</li>
+<li>离开房间后 PeerConnection、Janus handle、音频采集资源释放。</li>
+<li>WebSocket 成功但媒体失败时，日志能区分信令与 ICE/RTP 问题。</li>
+<li>至少一次断网恢复通过。</li>
+</ul>
+
+<p><strong>不通过不进入多人测试。</strong></p>
+
+<hr>
+
+<h2>10. 阶段 6：MediaProjection 与 WebRTC 视频轨道（学习目标：自定义 VideoCapturer / 屏幕采集）</h2>
+
+<h3>学习目标</h3>
+<ul>
+<li>理解 WebRTC 视频采集与编码路径。</li>
+<li>理解 <code>VideoCapturer</code>、<code>VideoSource</code>、<code>VideoTrack</code>、<code>VideoSink</code>。</li>
+<li>理解 Android <code>MediaProjection</code>、前台服务、<code>VirtualDisplay</code>、<code>ImageReader</code>。</li>
+<li>理解屏幕帧如何进入 WebRTC 编码器。</li>
+</ul>
+
+<h3>任务</h3>
+<ol>
+<li>Android 端实现 <code>MediaProjection</code> 授权流程。</li>
+<li>前台服务承载屏幕捕获，处理通知、停止按钮、授权撤销、进程退出。</li>
+<li>实现自定义 <code>VideoCapturer</code>，把屏幕帧送入 WebRTC 视频轨道。</li>
+<li>通过 Janus VideoRoom 发布屏幕视频轨道。初版每个房间同时只允许一个共享者。</li>
+<li>接收端提供原生观看界面，实现开始、停止、共享者退出、重新开始状态转换。</li>
+<li>分辨率/FPS 上限与自适应策略；第一版先保证稳定。</li>
+<li>在 <code>docs/learning/06_screen_share.md</code> 画出帧从 <code>MediaProjection</code> 到远端渲染的完整路径。</li>
+</ol>
+
+<h3>验收</h3>
+<ul>
+<li>共享者授权后才能捕获。</li>
+<li>远端能收到并显示屏幕画面；停止后远端在规定超时内移除。</li>
+<li>来电/切后台/锁屏/断网后不出现无法停止的录屏服务。</li>
+<li>语音与屏幕共享同时运行至少 30 分钟，记录帧率、首帧时间、CPU、内存、带宽。</li>
+<li>任一时刻最多一个共享者。</li>
+</ul>
+
+<hr>
+
+<h2>11. 阶段 7：Tracing、Perfetto、崩溃符号与可观测性（学习目标：trace_event / Perfetto / symbolization）</h2>
+
+<h3>学习目标</h3>
+<ul>
+<li>理解 <code>TRACE_EVENT</code>、<code>TRACE_EVENT0/1/2</code>、<code>TRACE_EVENT_BEGIN/END</code>。</li>
+<li>理解 Perfetto 抓取、分析、与 Chrome trace 的关系。</li>
+<li>理解 Android <code>logcat</code>、<code>tombstone</code>、<code>minidump</code> 与符号化。</li>
+<li>理解 release/debug 构建对符号的影响。</li>
+</ul>
+
+<h3>任务</h3>
+<ol>
+<li>在启动、登录、HTTP、WebSocket 重连、JoinRoom、PeerConnection 建立、首个音频包、屏幕共享首帧加 <code>TRACE_EVENT</code>。</li>
+<li>用 Perfetto 抓一次完整链路 trace，导出并在 UI 中查看。</li>
+<li>制造一次崩溃，保留可符号化堆栈。</li>
+<li>发布包与符号文件分开保存，记录 Chromium commit 和 GN args。</li>
+<li>统一日志字段：连接状态、错误码、请求 ID、房间 ID、消息 ID、RTC 状态、关键时长。</li>
+<li>高频日志不打印消息正文、邀请码、token、Cookie、私密地址。</li>
+<li>在 <code>docs/learning/07_tracing.md</code> 整理 trace 截图、符号化流程、日志字段表。</li>
+</ol>
+
+<h3>验收</h3>
+<ul>
+<li>能对关键链路抓 trace 并解释每一段。</li>
+<li>关键崩溃能用符号文件还原到函数/源码位置。</li>
+<li>日志能定位登录、消息、房间、WebRTC、屏幕共享失败阶段。</li>
+</ul>
+
+<hr>
+
+<h2>12. 阶段 8：综合夹具（文字聊天 + 多人语音 + 屏幕共享）</h2>
+
+<p>到这里才把学习成果串成完整产品。服务端和 Janus 保持最小化。</p>
+
+<h3>文字聊天</h3>
+<ul>
+<li>登录、房间列表、消息页。</li>
+<li><code>client_msg_id</code> + <code>(sender_id, client_msg_id)</code> 唯一约束防重复。</li>
+<li>ACK、发送中/失败状态、历史分页、自动重连、重连补拉。</li>
+<li>验收：两设备实时收发、历史恢复、断网重发只出现一次。</li>
+</ul>
+
+<h3>多人语音</h3>
+<ul>
+<li><code>VoiceSession</code> 生命周期接入 <code>RoomService</code>。</li>
+<li>服务端管理 Velo room 与 Janus VideoRoom 映射；客户端只拿临时凭据。</li>
+<li>断线先恢复 WebSocket，再决定复用或重建 PeerConnection。</li>
+<li>记录入房耗时、ICE 完成耗时、首音频时间、掉线次数、重连耗时、CPU/内存。</li>
+<li>逐级压测：2 人 30 分钟、5 人、10 人 60 分钟、30 人先验证成员列表与状态。</li>
+<li>允许设定明确媒体参与上限，超过时 UI 提示。</li>
+</ul>
+
+<h3>屏幕共享</h3>
+<ul>
+<li>沿用阶段 6 实现，接入房间 UI。</li>
+<li>任一时刻最多一个共享者。</li>
+<li>语音 + 共享同时运行 30 分钟并记录指标。</li>
+</ul>
+
+<h3>稳定性</h3>
+<ul>
+<li>测试安装、升级、服务端重启、客户端重启、数据库迁移。</li>
+<li>测试 24 小时空闲连接、频繁进出房间、反复开始/停止共享、网络切换、前后台切换。</li>
+<li>数据库自动备份与恢复演练。</li>
+<li>配置文件与密钥不进 Git。</li>
+</ul>
+
+<hr>
+
+<h2>13. 推荐实施顺序与退出条件</h2>
+
+<table>
+<thead>
+<tr><th>阶段</th><th>学习主线</th><th>产品夹具</th><th>未完成时禁止开始</th></tr>
+</thead>
+<tbody>
+<tr><td>0</td><td>GN/Ninja/DEPS/args.gn</td><td>可重复构建</td><td>不进入产品代码</td></tr>
+<tr><td>1</td><td>ContentMain / BrowserMainParts / 进程模型</td><td>APK + 按钮 + VeloRuntime</td><td>不先做聊天 UI</td></tr>
+<tr><td>2</td><td>JNI Zero / TaskRunner / 生命周期</td><td>Ping/Pong</td><td>不先做网络</td></tr>
+<tr><td>3</td><td>NetworkService / URLLoader / WebSocket</td><td><code>/healthz</code> + WS</td><td>不先做媒体</td></tr>
+<tr><td>4</td><td>Mojo / Renderer / Blink / WebUI</td><td>诊断页</td><td>不先做完整聊天</td></tr>
+<tr><td>5</td><td>ADM / PeerConnection / ICE</td><td>双向音频</td><td>不先做多人</td></tr>
+<tr><td>6</td><td>VideoCapturer / MediaProjection</td><td>屏幕共享</td><td>不进入发布候选</td></tr>
+<tr><td>7</td><td>TRACE_EVENT / Perfetto / 符号</td><td>可观测性</td><td>不做长稳测试</td></tr>
+<tr><td>8</td><td>综合夹具</td><td>聊天 + 语音 + 共享</td><td>不发布给朋友长期使用</td></tr>
+</tbody>
+</table>
+
+<p>不要在前一阶段未通过验收时并行推进后续三个阶段。对单人项目，减少并行未闭环任务比增加模块更重要。</p>
+
+<hr>
+
+<h2>14. 当前可以立即执行的第一组任务</h2>
+
+<ol>
+<li>确认分支状态，保存 M145 baseline tag，创建 <code>velo/mvp</code> 分支。</li>
+<li>保存 <code>args.gn</code> 到 <code>src/velo/config/m145_devrelease.args.gn</code>。</li>
+<li>按 M145 Android 文档准备构建依赖；不改动当前 Linux <code>out/m145_release</code>。</li>
+<li>构建并安装 <code>content_shell_apk</code>，抓 <code>logcat</code>，标出 Browser Process 初始化关键点。</li>
+<li>阅读 <code>content/shell/android/</code>、<code>content/public/android/</code>、<code>content/app/android/</code>，写第一份学习笔记。</li>
+<li>建最小 <code>//velo/android</code> target，打通 Kotlin → JNI → C++ <code>VeloRuntime::Start/Stop/Ping</code>。</li>
+<li>起一个最小 <code>/healthz</code> Go 服务，让 C++ Core 通过 Chromium 网络能力请求它。</li>
+</ol>
+
+<p>本阶段不写完整房间 UI，不实现 WebRTC 信令，不自研媒体服务器。</p>
+
+<hr>
+
+<h2>15. 开发规则（学习型项目版）</h2>
+
+<ol>
+<li><strong>一条链路先闭环。</strong>每次只推进一个可验收的端到端能力。</li>
+<li><strong>先使用 Chromium 现有机制。</strong>Network、任务调度、JNI、日志、WebRTC 优先用对应版本内已有正式接口。</li>
+<li><strong>禁止未验证的大抽象。</strong>一个模块至少有实际调用者和测试后再抽象。</li>
+<li><strong>状态只有一个所有者。</strong>Room/Chat/RTC 状态由 C++ Core 或服务端明确拥有；UI 只展示并发命令。</li>
+<li><strong>每个跨层调用都定义失败语义。</strong>JNI 错误、HTTP 错误、WebSocket 断开、ICE 失败、权限拒绝都要有状态和恢复策略。</li>
+<li><strong>每阶段记录命令与结果。</strong>构建命令、测试设备、服务端版本、复现步骤、失败日志。不写无法验收的“已完成”。</li>
+<li><strong>不做没有基线的优化。</strong>先记录真实启动时间、连接时间、首消息、入房、首音频、首帧，再决定优化。</li>
+<li><strong>尽量不动上游。</strong>对 Chromium 的改动要小、要记录、要能 rebase。定期检查上游是否已有更合适的接口。</li>
+<li><strong>主动对比真实 Chrome。</strong>每学一个子系统，问：真实 Chrome 怎么用？我们的 embedder 缺了什么？这本身是最有价值的学习产物。</li>
+</ol>
+
+<hr>
+
+<h2>16. 参考资料</h2>
+
+<h3>Chromium 构建与嵌入</h3>
+<ul>
+<li>Chromium Linux build instructions: <a href="https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/linux/build_instructions.md">https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/linux/build_instructions.md</a></li>
+<li>Chromium Android build instructions: <a href="https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/android_build_instructions.md">https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/android_build_instructions.md</a></li>
+<li>Content module overview: <a href="https://chromium.googlesource.com/chromium/src/+/main/content/README.md">https://chromium.googlesource.com/chromium/src/+/main/content/README.md</a></li>
+<li>JNI Zero: <a href="https://chromium.googlesource.com/chromium/src/+/main/third_party/jni_zero/README.md">https://chromium.googlesource.com/chromium/src/+/main/third_party/jni_zero/README.md</a></li>
+</ul>
+
+<h3>网络、Mojo、Tracing</h3>
+<ul>
+<li>Network Service design: <a href="https://chromium.googlesource.com/chromium/src/+/main/services/network/README.md">https://chromium.googlesource.com/chromium/src/+/main/services/network/README.md</a></li>
+<li>Mojo: <a href="https://chromium.googlesource.com/chromium/src/+/main/mojo/README.md">https://chromium.googlesource.com/chromium/src/+/main/mojo/README.md</a></li>
+<li>Tracing / Perfetto: <a href="https://chromium.googlesource.com/chromium/src/+/main/docs/tracing.md">https://chromium.googlesource.com/chromium/src/+/main/docs/tracing.md</a></li>
+</ul>
+
+<h3>WebRTC 与媒体</h3>
+<ul>
+<li>Chromium WebRTC: <a href="https://webrtc.googlesource.com/src/">https://webrtc.googlesource.com/src/</a></li>
+<li>Janus VideoRoom SFU plugin: <a href="https://janus.conf.meetecho.com/docs/videoroom.html">https://janus.conf.meetecho.com/docs/videoroom.html</a></li>
+<li>Janus Gateway sample config: <a href="https://github.com/meetecho/janus-gateway/blob/master/conf/janus.plugin.videoroom.jcfg.sample">https://github.com/meetecho/janus-gateway/blob/master/conf/janus.plugin.videoroom.jcfg.sample</a></li>
+</ul>
+
+<h3>学习产物参考</h3>
+<ul>
+<li>Chromium docs 目录：<code>src/docs/</code></li>
+<li>Chromium design docs: <a href="https://www.chromium.org/developers/design-documents/">https://www.chromium.org/developers/design-documents/</a></li>
+</ul>
+
+<hr>
+
+<h2>17. 与 v2 的主要差异</h2>
+
+<table>
+<thead>
+<tr><th>维度</th><th>v2</th><th>v3</th></tr>
+</thead>
+<tbody>
+<tr><td>项目目标</td><td>交付私有通讯 MVP</td><td>学 Chromium，通讯是夹具</td></tr>
+<tr><td>服务端/Janus</td><td>产品级最小可用</td><td>夹具级，能用即可</td></tr>
+<tr><td>WebContents</td><td>明确不用</td><td>新增诊断页，学 Blink/Mojo</td></tr>
+<tr><td>媒体 spike</td><td>阶段 4 才验证</td><td>阶段 1 后就要验证采集</td></tr>
+<tr><td>学习产物</td><td>未要求</td><td>每阶段必须有调用图、Trace、源码清单</td></tr>
+<tr><td>验收标准</td><td>功能可用</td><td>功能可用 + 能解释 + 能画图 + 能定位改动点</td></tr>
+<tr><td>阶段划分</td><td>0–7</td><td>0–8，新增 JNI、Mojo 阶段，Tracing 独立成阶段</td></tr>
+<tr><td>主攻方向</td><td>未明确</td><td>A Android embedder、B 网络栈、C WebRTC</td></tr>
+</tbody>
+</table>
+
+<p>一句话总结 v3：<strong>把主线换成 Chromium 子系统学习，把通讯功能降级为夹具，把“能解释、能定位改动点”写进每个阶段的验收。</strong></p>
+
+</body>
+</html>
